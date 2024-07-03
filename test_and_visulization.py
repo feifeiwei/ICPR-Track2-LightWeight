@@ -71,7 +71,7 @@ class Trainer(object):
 
         # Load trained model
         self.model.load_state_dict(checkpoint['state_dict'])
-        #self.model = self.model.to('cuda')
+        self.model = self.model.to('cuda')
         # Test
         self.model.eval()
         tbar = tqdm(self.test_data)
@@ -79,8 +79,8 @@ class Trainer(object):
         with torch.no_grad():
             num = 0
             for i, ( data, labels, size) in enumerate(tbar):
-                data = data#.cuda()
-                labels = labels#.cuda()
+                data = data.cuda()
+                labels = labels.cuda()
                 pred = self.model(data)
 
 
