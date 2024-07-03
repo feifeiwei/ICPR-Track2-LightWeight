@@ -70,7 +70,7 @@ class Trainer(object):
         make_visulization_dir(eval_image_path, eval_fuse_path)
 
         # Load trained model
-        self.model.load_state_dict(checkpoint['state_dict'])
+        self.model.load_state_dict(checkpoint['state_dict'] , map_location=torch.device('cpu'))
         #self.model = self.model.to('cuda')
         # Test
         self.model.eval()
