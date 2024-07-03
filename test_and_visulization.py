@@ -60,7 +60,7 @@ class Trainer(object):
 
         # Checkpoint
         #checkpoint        = torch.load(args.root.split('dataset')[0] +args.model_dir)
-        checkpoint = torch.load(args.model_dir)
+        checkpoint = torch.load(args.model_dir , map_location=torch.device('cpu'))
         target_image_path = dataset_dir + '/' +'visulization_result' + '/' + args.st_model + '_visulization_result'
         target_dir        = dataset_dir + '/' +'visulization_result' + '/' + args.st_model + '_visulization_fuse'
         eval_image_path   = './result_WS/'+ args.st_model +'/'+ 'visulization_result'
