@@ -14,7 +14,7 @@ from torch.nn.modules.utils import _pair
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
-import ml_collections
+
 from einops import rearrange
 import numbers
 from thop import profile
@@ -35,7 +35,7 @@ class Channel_Embeddings(nn.Module):
                                        kernel_size=patch_size,
                                        stride=patch_size)
         self.position_embeddings = nn.Parameter(torch.zeros(1, n_patches, in_channels))
-        self.dropout = Dropout(config.transformer["embeddings_dropout_rate"])
+        self.dropout = Dropout(0.1)
 
     def forward(self, x):
         if x is None:
@@ -378,7 +378,7 @@ class Encoder(nn.Module):
         self.encoder_norm3 = LayerNorm3d(channel_num[2], LayerNorm_type='WithBias')
         self.encoder_norm4 = LayerNorm3d(channel_num[3], LayerNorm_type='WithBias')
 
-        for _ in range(config.transformer["num_layers"]):
+        for _ in range(config.transformer_num_layers):
             layer = Block_ViT(config, vis, channel_num)
             self.layer.append(copy.deepcopy(layer))
 
@@ -561,21 +561,31 @@ class Res_block(nn.Module):
         return out
 
 
-def get_CTranS_config():
-    config = ml_collections.ConfigDict()
-    config.transformer = ml_collections.ConfigDict()
-    config.KV_size = 120  # KV_size = Q1 + Q2 + Q3 + Q4
-    config.transformer.num_heads = 4
-    config.transformer.num_layers = 2
-    config.patch_sizes = [16, 8, 4, 2]#[16, 8, 4, 2]
-    config.base_channel = 8  # base channel of U-Net
-    config.n_classes = 1
+# def get_CTranS_config():
+#     config = ml_collections.ConfigDict()
+#     config.transformer = ml_collections.ConfigDict()
+#     config.KV_size = 120  # KV_size = Q1 + Q2 + Q3 + Q4
+#     config.transformer.num_heads = 4
+#     config.transformer.num_layers = 2
+#     config.patch_sizes = [16, 8, 4, 2]#[16, 8, 4, 2]
+#     config.base_channel = 8  # base channel of U-Net
+#     config.n_classes = 1
 
-    # ********** useless **********
-    config.transformer.embeddings_dropout_rate = 0.1
-    config.transformer.attention_dropout_rate = 0.1
-    config.transformer.dropout_rate = 0
-    return config
+#     # ********** useless **********
+#     config.transformer.embeddings_dropout_rate = 0.1
+#     config.transformer.attention_dropout_rate = 0.1
+#     config.transformer.dropout_rate = 0
+#     return config
+
+
+class T_Config:
+    KV_size = 120  # KV_size = Q1 + Q2 + Q3 + Q4
+    # transformer_num_heads = 4
+    transformer_num_layers = 2
+    patch_sizes = [16, 8, 4, 2]#[16, 8, 4, 2]
+    base_channel = 8  # base channel of U-Net
+    n_classes = 1
+
 
 
 class LightWeightNetwork(nn.Module):
@@ -583,7 +593,7 @@ class LightWeightNetwork(nn.Module):
         super().__init__()
 
 
-        config = get_CTranS_config()
+        config = T_Config() #get_CTranS_config()
         self.vis = vis
         self.deepsuper = deepsuper
         print('Deep-Supervision:', deepsuper)
