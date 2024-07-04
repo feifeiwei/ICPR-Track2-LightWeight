@@ -17,8 +17,9 @@ from model.load_param_data         import  load_dataset, load_param
 
 # model
 
-from model.net          import  LightWeightNetwork
-from model.lbunet          import  LBUNet
+# from model.net          import  LightWeightNetwork
+# from model.lbunet          import  LBUNet
+from model.SCTransNet          import  LightWeightNetwork
 
 import scipy.io as scio
 
@@ -59,10 +60,9 @@ class Trainer(object):
 
         # Choose and load model (this paper is finished by one GPU)
 
-        if args.model == 'UNet':
-            model       = LightWeightNetwork()
-        elif args.model == 'lbunet':
-            model       = LBUNet()
+        #if args.model == 'UNet':
+        model       = LightWeightNetwork()
+
 
         print("using model: ", args.model)
 
@@ -108,6 +108,8 @@ class Trainer(object):
             losses.update(loss.item(), pred.size(0))
             tbar.set_description('Epoch %d, training loss %.4f' % (epoch, losses.avg))
 
+            
+
   #
         self.train_loss = losses.avg
         if args.lr_mode == 'adjusted_lr':
@@ -122,7 +124,7 @@ class Trainer(object):
         losses = AverageMeter()
 
         with torch.no_grad():
-            for i, ( data, labels) in enumerate(tbar):
+            for i, ( data, labels, _) in enumerate(tbar):
                 data   = data.cuda()
                 labels = labels.cuda()
                 pred   = self.model(data)
@@ -173,7 +175,7 @@ class Trainer(object):
         losses = AverageMeter()
         with torch.no_grad():
             num = 0
-            for i, (data, labels) in enumerate(tbar):
+            for i, (data, labels, _) in enumerate(tbar):
                 data   = data.cuda()
                 labels = labels.cuda()
                 pred = self.model(data)

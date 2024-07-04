@@ -6,7 +6,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Dense_Nested_Attention_Network_For_SIRST')
 
     # choose model
-    parser.add_argument('--model', type=str, default='lbunet')
+    parser.add_argument('--model', type=str, default='lbunet') #
     parser.add_argument('--attention', type=str, default='Res_block')
     parser.add_argument('--downlayer', type=str, default='two',
                         help='three, four')
@@ -25,7 +25,7 @@ def parse_args():
     # data and pre-process
     parser.add_argument('--dataset',      type=str, default='ICPR_Track2')
     parser.add_argument('--mode', type=str, default='TXT', help='mode name:  TXT, Ratio')
-    parser.add_argument('--lr_mode', type=str, default='fixed_lr', help='lr_mode name:  adjusted_lr, fixed_lr')
+    parser.add_argument('--lr_mode', type=str, default='adjusted_lr', help='lr_mode name:  adjusted_lr, fixed_lr')
     parser.add_argument('--test_size', type=float, default='0.5', help='when mode==Ratio')
     parser.add_argument('--root', type=str, default='./dataset')
     parser.add_argument('--suffix', type=str, default='.png')
@@ -46,7 +46,7 @@ def parse_args():
                         help='number of epochs to train (default: 110)')
     parser.add_argument('--start_epoch', type=int, default=0,
                         metavar='N', help='start epochs (default:0)')
-    parser.add_argument('--train_batch_size', type=int, default=64,
+    parser.add_argument('--train_batch_size', type=int, default=32,
                         metavar='N', help='input batch size for \
                         training (default: 16)')
     parser.add_argument('--test_batch_size', type=int, default=32,
@@ -55,7 +55,7 @@ def parse_args():
     parser.add_argument('--eval_batch_size', type=int, default=1,
                         metavar='N', help='input batch size for \
                         evaluation (default: 32)')
-    parser.add_argument('--min_lr', default=1e-5,
+    parser.add_argument('--min_lr', default=5e-5,
                         type=float, help='minimum learning rate')
     parser.add_argument('--optimizer', type=str, default='Adagrad',
                         help=' Adam, Adagrad, SGD')
@@ -65,7 +65,7 @@ def parse_args():
                         help='learning rate (default: 0.1)')
 
     # cuda and logging
-    parser.add_argument('--gpus', type=str, default='9',
+    parser.add_argument('--gpus', type=str, default='8',
                         help='Training with GPUs, you can specify 1,3 for example.')
     args = parser.parse_args()
 
