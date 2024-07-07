@@ -1,361 +1,311 @@
 import torch
-from torch import nn
+import torch.nn as nn
 import torch.nn.functional as F
-
-# from timm.models.layers import trunc_normal_
-import math
-
-
-class LayerNorm(nn.Module):
-    r""" From ConvNeXt (https://arxiv.org/pdf/2201.03545.pdf)
-    """
-    def __init__(self, normalized_shape, eps=1e-6, data_format="channels_last"):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(normalized_shape))
-        self.bias = nn.Parameter(torch.zeros(normalized_shape))
-        self.eps = eps
-        self.data_format = data_format
-        if self.data_format not in ["channels_last", "channels_first"]:
-            raise NotImplementedError 
-        self.normalized_shape = (normalized_shape, )
-    
-    def forward(self, x):
-        if self.data_format == "channels_last":
-            return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
-        elif self.data_format == "channels_first":
-            u = x.mean(1, keepdim=True)
-            s = (x - u).pow(2).mean(1, keepdim=True)
-            x = (x - u) / torch.sqrt(s + self.eps)
-            x = self.weight[:, None, None] * x + self.bias[:, None, None]
-            return x
-    
-
-class Down(nn.Sequential):
-    def __init__(self, in_channels):
-        super().__init__()
-        self.bn = nn.BatchNorm2d(in_channels)
-        self.conv = nn.Conv2d(in_channels, in_channels, kernel_size=2, stride=2)
-    
-    def forward(self, x):
-        return self.conv(self.bn(x))
-
-class Down2(nn.Sequential):
-    def __init__(self, in_channels):
-        super().__init__()
-        self.bn = nn.BatchNorm2d(in_channels)
-        self.conv = nn.Conv2d(in_channels, in_channels, kernel_size=2, stride=2, groups=in_channels)
-    
-    def forward(self, x):
-        return self.conv(self.bn(x))
-
-class ConvLayer(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.conv1 = nn.Conv2d(dim, dim, kernel_size=7, padding=3, stride=1, groups=dim, padding_mode='reflect') # depthwise conv
-        self.norm1 = nn.BatchNorm2d(dim)
-        self.conv2 = nn.Conv2d(dim, 4 * dim, kernel_size=1, padding=0, stride=1)
-        self.act1 = nn.GELU()
-        self.norm2 = nn.BatchNorm2d(dim)
-        self.conv3 = nn.Conv2d(4 * dim, dim, kernel_size=1, padding=0, stride=1)
-        self.act2 = nn.GELU()
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.norm1(x)
-        x = self.conv2(x)
-        x = self.act1(x)
-        x = self.conv3(x)
-        x = self.norm2(x)
-        x = self.act2(x)
-        return x
-    
-    
-class Boundary_Prediction_Generator(nn.Module):
-    def __init__(self, in_channels):
-        super().__init__()
-        self.in_channels = in_channels
-        self.conv = nn.Conv2d(in_channels, 1, kernel_size=1, stride=1)
-
-    def forward(self, x):
-        boundary = torch.sigmoid(self.conv(x))
-        x = x + x * boundary
-        return x, boundary
-
-class Image_Prediction_Generator(nn.Module):
-    def __init__(self, in_channels):
-        super().__init__()
-        self.in_channels = in_channels
-        self.conv = nn.Conv2d(in_channels, 1, kernel_size=1, stride=1)
-
-    def forward(self, x):
-        gt_pre = self.conv(x)
-        x = x + x * torch.sigmoid(gt_pre)
-        return x, gt_pre
-
-class Prediction_Generator(nn.Module):
-    def __init__(self, in_channels):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, 1, kernel_size=1, stride=1)
-        self.conv2 = nn.Conv2d(in_channels, 1, kernel_size=1, stride=1)
-
-    def forward(self, x):
-        boundary = torch.sigmoid(self.conv1(x))
-        gt_pre = self.conv2(x)
-        return (x + x * boundary + x * torch.sigmoid(gt_pre)), gt_pre, boundary
+import time
+from .model_utils import BasicBlock, Bottleneck, segmenthead, AFF, ASPP, CARAFE, segmentheadCARAFE, iAFF, segmenthead_drop, Muti_AFF, segmenthead_c, DUC, SPASPP, MFACB
+import logging
+import os
+from thop import profile
+import pdb
+BatchNorm2d = nn.BatchNorm2d
+bn_mom = 0.1
+algc = False
 
 
-class Group_shuffle_block(nn.Module):
-    def __init__(self, dim_in, dim_out):
-        super().__init__()
-        c_dim = dim_in // 4
+class DSNet(nn.Module):
 
-        self.share_space1 = nn.Parameter(torch.Tensor(1, c_dim, 8, 8), requires_grad=True)
-        nn.init.ones_(self.share_space1)
+    def __init__(self, m=2, n=3, num_classes=19, planes=64, name='s128', augment=True):
+        super(DSNet, self).__init__()
+        self.augment = augment
+        self.name = name
+        # I Branch
         self.conv1 = nn.Sequential(
-            nn.Conv2d(c_dim, c_dim, kernel_size=3, padding=1, groups=c_dim),
-            nn.GELU(),
-            nn.Conv2d(c_dim, c_dim, 1)
-        )
-        self.share_space2 = nn.Parameter(torch.Tensor(1, c_dim, 8, 8), requires_grad=True)
-        nn.init.ones_(self.share_space2)
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(c_dim, c_dim, kernel_size=3, padding=1, groups=c_dim),
-            nn.GELU(),
-            nn.Conv2d(c_dim, c_dim, 1)
-        )
-        self.share_space3 = nn.Parameter(torch.Tensor(1, c_dim, 8, 8), requires_grad=True)
-        nn.init.ones_(self.share_space3)
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(c_dim, c_dim, kernel_size=3, padding=1, groups=c_dim),
-            nn.GELU(),
-            nn.Conv2d(c_dim, c_dim, 1)
-        )
-        self.share_space4 = nn.Parameter(torch.Tensor(1, c_dim, 8, 8), requires_grad=True)
-        nn.init.ones_(self.share_space4)
-        self.conv4 = nn.Sequential(
-            nn.Conv2d(c_dim, c_dim, kernel_size=3, padding=1, groups=c_dim),
-            nn.GELU(),
-            nn.Conv2d(c_dim, c_dim, 1)
+            nn.Conv2d(3, planes, kernel_size=3, stride=2, padding=1),
+            BatchNorm2d(planes, momentum=bn_mom),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(planes, planes, kernel_size=3, stride=2, padding=1),
+            BatchNorm2d(planes, momentum=bn_mom),
+            nn.ReLU(inplace=True),
         )
 
-        self.norm1 = LayerNorm(dim_in, eps=1e-6, data_format='channels_first')
-        self.norm2 = LayerNorm(dim_in, eps=1e-6, data_format='channels_first')
+        self.relu = nn.ReLU(inplace=False)
+        self.layer1 = self._make_layer(BasicBlock, planes, planes, m)
+        self.layer2 = self._make_layer(BasicBlock, planes, planes * 2, m, stride=2)
         
-        self.ldw = nn.Sequential(
-            nn.Conv2d(dim_in, dim_in, kernel_size=3, padding=1, groups=dim_in),
-            nn.GELU(),
-            nn.Conv2d(dim_in, dim_out, 1),
+        self.layer3 = nn.Sequential(
+                MFACB(planes * 2,planes * 1, planes * 2,block_num=2, dilation=[2,2,2]),
+                MFACB(planes * 2,planes * 2, planes * 2,block_num=2,dilation=[2,2,2]),
+                MFACB(planes * 2,planes * 2, planes * 4,block_num=2,dilation=[3,3,3]),
         )
-
-    def forward(self, x):
-        x = self.norm1(x)
-        x1, x2, x3, x4 = torch.chunk(x, 4, dim=1)
-        B, C, H, W = x1.size()
-        x1 = x1 * self.conv1(F.interpolate(self.share_space1, size=x1.shape[2:4],mode='bilinear', align_corners=True))
-        x2 = x2 * self.conv2(F.interpolate(self.share_space2, size=x1.shape[2:4],mode='bilinear', align_corners=True))
-        x3 = x3 * self.conv3(F.interpolate(self.share_space3, size=x1.shape[2:4],mode='bilinear', align_corners=True))
-        x4 = x4 * self.conv4(F.interpolate(self.share_space4, size=x1.shape[2:4],mode='bilinear', align_corners=True))
-        x = torch.cat([x2,x4,x1,x3], dim=1)
-        x = self.norm2(x)
-        x = self.ldw(x)
-        return x
-    
-class Merge(nn.Module):
-    def __init__(self, dim_in):
-        super().__init__()
-
-    def forward(self, x1, x2, gt_pre, w):
-        x = x1 + x2 + torch.sigmoid(gt_pre) * x2 * w
-        return x
-
-class Merge2(nn.Module):
-    def __init__(self, dim_in):
-        super().__init__()      
-
-    def forward(self, x1, x2, gt_pre, boundary_pre, w1, w2):
-        x = x1 + x2 + torch.sigmoid(gt_pre) * x2 * w1 + boundary_pre * x2 * w2
-        return x
-
-
-class LightWeightNetwork(nn.Module):
-    
-    def __init__(self, num_classes=1, input_channels=3, c_list=[8,16,24,32,48,64]):
-        super().__init__()
         
-        self.encoder1 = nn.Sequential(
-            nn.Conv2d(input_channels, c_list[0], 3, stride=1, padding=1),
+        if 's' in self.name:
+            self.layer4 = nn.Sequential(
+                MFACB(planes * 4,planes * 2,planes * 2,block_num=2,dilation=[3,3,3]),
+                MFACB(planes * 2,planes * 4,planes * 8,block_num=2,dilation=[5,5,5]),
+            )
+        if 'm' in self.name:
+            self.layer4 = nn.Sequential(
+                    MFACB(planes * 4,planes * 4,planes * 8,block_num=2,dilation=[3,3,3]),
+                    MFACB(planes * 8,planes * 8,planes * 8,block_num=2,dilation=[5,5,5]),
+                    MFACB(planes * 8,planes * 8,planes * 8,block_num=2,dilation=[5,5,5]),
+            )
+
+        self.layer5 = self._make_layer(Bottleneck, planes * 8, planes * 4, 1, stride=1, dilation=5)
+
+        self.compression3 = nn.Sequential(
+            nn.Conv2d(planes * 4, planes * 4, kernel_size=1, bias=False),
+            BatchNorm2d(planes * 4, momentum=bn_mom),
         )
-        self.encoder2 =nn.Sequential(
-            nn.Conv2d(c_list[0], c_list[1], 3, stride=1, padding=1),
-        ) 
-        self.encoder3 = nn.Sequential(
-            nn.Conv2d(c_list[1], c_list[2], 3, stride=1, padding=1),
-            ConvLayer(c_list[2]),
+        self.compression4 = nn.Sequential(
+            nn.Conv2d(planes * 8, planes * 4, kernel_size=1, bias=False),
+            BatchNorm2d(planes * 4, momentum=bn_mom),
         )
-        self.encoder4 = nn.Sequential(
-            Group_shuffle_block(c_list[2], c_list[3]),
-        )
-        self.encoder5 = nn.Sequential(
-            Group_shuffle_block(c_list[3], c_list[4]),
-        )
-        self.encoder6 = nn.Sequential(
-            Group_shuffle_block(c_list[4], c_list[5]),
+
+        self.compression5 = nn.Sequential(
+            nn.Conv2d(planes * 8, planes * 4, kernel_size=1, bias=False),
+            BatchNorm2d(planes * 4, momentum=bn_mom),
         )
 
 
-        self.Down1 = Down(c_list[0])
-        self.Down2 = Down(c_list[1])
-        self.Down3 = Down(c_list[2])
+        self.layer3_ = self._make_layer(BasicBlock, planes * 2, planes * 4, n)
+        self.layer4_ = self._make_layer(BasicBlock, planes * 4, planes * 4, n)
+        self.layer5_ = self._make_layer(Bottleneck, planes * 4, planes * 2, 1)
 
-        self.merge1 = Merge2(c_list[0])
-        self.merge2 = Merge2(c_list[1])
-        self.merge3 = Merge2(c_list[2])
-        self.merge4 = Merge(c_list[3])
-        self.merge5 = Merge(c_list[4])
+
+
         
-        self.decoder1 = nn.Sequential(
-            Group_shuffle_block(c_list[5], c_list[4]),
-        ) 
-        self.decoder2 = nn.Sequential(
-            Group_shuffle_block(c_list[4], c_list[3]),
-        ) 
-        self.decoder3 = nn.Sequential(
-            Group_shuffle_block(c_list[3], c_list[2]),
-        )  
-        self.decoder4 = nn.Sequential(
-            nn.Conv2d(c_list[2], c_list[1], 3, stride=1, padding=1),
-        )  
-        self.decoder5 = nn.Sequential(
-            nn.Conv2d(c_list[1], c_list[0], 3, stride=1, padding=1),
-        )  
 
-        self.pred1 = Image_Prediction_Generator(c_list[4])
-        self.pred2 = Image_Prediction_Generator(c_list[3])
-        self.gate1 = Prediction_Generator(c_list[2])
-        self.gate2 = Prediction_Generator(c_list[1])
-        self.gate3 = Prediction_Generator(c_list[0])
+        # 融合模块
+        self.aff1 = Muti_AFF(channels=planes*4)
+        self.aff2 = Muti_AFF(channels=planes*4)
+        self.aff3 = Muti_AFF(channels=planes*4)
+        
 
-        self.ebn1 = nn.GroupNorm(4, c_list[0])
-        self.ebn2 = nn.GroupNorm(4, c_list[1])
-        self.ebn3 = nn.GroupNorm(4, c_list[2])
-        self.ebn4 = nn.GroupNorm(4, c_list[3])
-        self.ebn5 = nn.GroupNorm(4, c_list[4])
-        self.dbn1 = nn.GroupNorm(4, c_list[4])
-        self.dbn2 = nn.GroupNorm(4, c_list[3])
-        self.dbn3 = nn.GroupNorm(4, c_list[2])
-        self.dbn4 = nn.GroupNorm(4, c_list[1])
-        self.dbn5 = nn.GroupNorm(4, c_list[0])
+        if self.name == 's128' or self.name == 'm':  
+            self.spp = SPASPP(planes*4, planes*4, planes*4)
+            self.layer1_a = self._make_layer(BasicBlock, planes, planes, 1)
+            self.up8 = nn.Sequential(
+            nn.Conv2d(planes * 4, planes * 4, kernel_size=3, padding=1, bias=False),
+            BatchNorm2d(planes * 4, momentum=bn_mom),
+            )
+            self.lastlayer = segmenthead_c(planes*5, planes*4, num_classes)
+        
+        if self.name == 's64':  
+            self.spp = SPASPP(planes*4, planes*4, planes*4)
+            self.layer1_a = self._make_layer(BasicBlock, planes, planes, 1)
+            self.up8 = nn.Sequential(
+            nn.Conv2d(planes * 4, planes * 2, kernel_size=3, padding=1, bias=False),
+            BatchNorm2d(planes * 2, momentum=bn_mom),
+            )
+            self.lastlayer = segmenthead_c(planes*3, planes*2, num_classes)
+            
+        if self.name == 's32': 
+            self.spp = SPASPP(planes*4, planes*4, planes*4)
+            self.layer1_a = self._make_layer(BasicBlock, planes, planes, 1)
+            self.up8 = nn.Sequential(
+            nn.Conv2d(planes * 4, planes * 1, kernel_size=3, padding=1, bias=False),
+            BatchNorm2d(planes * 1, momentum=bn_mom),
+            )
 
-        self.final = nn.Sequential(
-            nn.Conv2d(c_list[0], num_classes, kernel_size=1),
-        )
+            #pdb.set_trace()
+            self.lastlayer = segmenthead_c(planes*2, planes*2, num_classes)
 
-        self.apply(self._init_weights)
+        if self.name == 's256':  
+            self.spp = SPASPP(planes*4, planes*8, planes*8)
+            self.layer1_a = self._make_layer(BasicBlock, planes, planes*2, 1)
+            self.up8 = nn.Sequential(
+            nn.Conv2d(planes * 8, planes * 8, kernel_size=3, padding=1, bias=False),
+            BatchNorm2d(planes * 8, momentum=bn_mom),
+            )
+            self.lastlayer = segmenthead_c(planes*10, planes*8, num_classes)
 
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            # trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
+
+        if augment:
+            self.seghead_p = segmenthead(planes * 4, planes * 4, num_classes)
+            self.seghead_d = segmenthead(planes * 4, planes, num_classes)
+
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.Conv1d):
-                n = m.kernel_size[0] * m.out_channels
-                m.weight.data.normal_(0, math.sqrt(2. / n))
-        elif isinstance(m, nn.Conv2d):
-            fan_out = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-            fan_out //= m.groups
-            m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
-            if m.bias is not None:
-                m.bias.data.zero_()
 
+    def _make_layer(self, block, inplanes, planes, blocks, stride=1, dilation =1):
+        downsample = None
+        if stride != 1 or inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                nn.Conv2d(inplanes, planes * block.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * block.expansion, momentum=bn_mom),
+            )
+
+        layers = []
+        layers.append(block(inplanes, planes, stride, downsample, dilation=dilation))
+        inplanes = planes * block.expansion
+        for i in range(1, blocks):
+            if i == (blocks - 1):
+                layers.append(block(inplanes, planes, stride=1, no_relu=True, dilation=dilation))
+            else:
+                layers.append(block(inplanes, planes, stride=1, no_relu=False, dilation=dilation))
+
+        return nn.Sequential(*layers)
+
+    def _make_single_layer(self, block, inplanes, planes, stride=1):
+        downsample = None
+        if stride != 1 or inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                nn.Conv2d(inplanes, planes * block.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * block.expansion, momentum=bn_mom),
+            )
+
+        layer = block(inplanes, planes, stride, downsample, no_relu=True)
+
+        return layer
+
+        
     def forward(self, x):
-        
-        out = self.encoder1(x)
-        out = F.gelu(self.Down1(self.ebn1(out)))
-        t1 = out # b, 8, 128, 128
 
-        out = self.encoder2(out)
-        out = F.gelu(self.Down2(self.ebn2(out)))
-        t2 = out # b, 16, 64, 64
+        width_output = x.shape[-1]
+        height_output = x.shape[-2]
+        x = self.conv1(x)
+        x = self.layer1(x)
+        x_a = self.layer1_a(x)
+        x = self.relu(self.layer2(self.relu(x))) 
 
-        out = self.encoder3(out)
-        out = F.gelu(self.Down3(self.ebn3(out)))
-        t3 = out # b, 24, 32, 32
-        
-        out = self.encoder4(out)
-        out = F.gelu(F.max_pool2d(self.ebn4(out), 2))
-        t4 = out # b, 32, 16, 16
-        
-        out = self.encoder5(out)
-        out = F.gelu(F.max_pool2d(self.ebn5(out), 2))
-        t5 = out # b, 48, 8, 8
-        
-        out = self.encoder6(out)
-        out = F.gelu(out) # b, 64, 8, 8
-        
-        out = self.decoder1(out)
-        out = F.gelu(self.dbn1(out)) # b, 48, 8, 8
 
-        out, gt_pre5 = self.pred1(out)
-        out = self.merge5(out, t5, gt_pre5, 0.1) # b, 48, 8, 8
-        gt_pre5 = F.interpolate(gt_pre5, scale_factor=32, mode ='bilinear', align_corners=True)
+        x_ = self.layer3_(x)  
+        x = self.layer3(x)  
+        x_ = self.aff1(x_, self.compression3(x))  
+        if self.augment:
+            temp_1 = x_   
 
-        
-        out = self.decoder2(out)
-        out = F.gelu(F.interpolate(self.dbn2(out),scale_factor=(2,2),mode ='bilinear',align_corners=True)) # b, 32, 16, 16
-        out, gt_pre4 = self.pred2(out)
-        out = self.merge4(out, t4, gt_pre4, 0.2) # b, 32, 16, 16
-        gt_pre4 = F.interpolate(gt_pre4, scale_factor=16, mode ='bilinear', align_corners=True)
-        
-        out = self.decoder3(out)
-        out = F.gelu(F.interpolate(self.dbn3(out),scale_factor=(2,2),mode ='bilinear',align_corners=True)) # b, 24, 32, 32
-        out, gt_pre3, weight1 = self.gate1(out)
-        out = self.merge3(out, t3, gt_pre3, weight1, 0.3, 0.1) # b, 24, 32, 32
-        weight1 = F.interpolate(weight1, scale_factor=8, mode ='bilinear', align_corners=True)
-        gt_pre3 = F.interpolate(gt_pre3, scale_factor=8, mode ='bilinear', align_corners=True)
-        
-        out = self.decoder4(out)
-        out = F.gelu(F.interpolate(self.dbn4(out),scale_factor=(2,2),mode ='bilinear',align_corners=True)) # b, 16, 64, 64
-        out, gt_pre2, weight2 = self.gate2(out)
-        out = self.merge2(out, t2, gt_pre2, weight2, 0.4, 0.2) # b, 16, 64, 64 
-        weight2 = F.interpolate(weight2, scale_factor=4, mode ='bilinear', align_corners=True)
-        gt_pre2 = F.interpolate(gt_pre2, scale_factor=4, mode ='bilinear', align_corners=True)
-        
-        out = self.decoder5(out)
-        out = F.gelu(F.interpolate(self.dbn5(out),scale_factor=(2,2),mode ='bilinear',align_corners=True)) # b, 8, 128, 128
-        out, gt_pre1, weight3 = self.gate3(out)
-        out = self.merge1(out, t1, gt_pre1, weight3, 0.5, 0.3) # b, 3, 128, 128
-        weight3 = F.interpolate(weight3, scale_factor=2, mode ='bilinear', align_corners=True)
-        gt_pre1 = F.interpolate(gt_pre1, scale_factor=2, mode ='bilinear', align_corners=True)
-        
-        out = self.final(out)
-        out = F.interpolate(out,scale_factor=(2,2),mode ='bilinear',align_corners=True) # b, num_class, H, W
 
-        gt_pre1 = torch.sigmoid(gt_pre1)
-        gt_pre2 = torch.sigmoid(gt_pre2)
-        gt_pre3 = torch.sigmoid(gt_pre3)
-        gt_pre4 = torch.sigmoid(gt_pre4)
-        gt_pre5 = torch.sigmoid(gt_pre5)
+        x = self.layer4(x) 
 
-        #return (gt_pre5, gt_pre4, gt_pre3, gt_pre2, gt_pre1), (weight1, weight2, weight3), out
-        return  out
+        x_ = self.layer4_(self.relu(x_))  
 
+        x_ = self.aff2(x_, self.compression4(x)) 
+        if self.augment:
+            temp_2 = x_
+
+        x_ = self.layer5_(self.relu(x_))
+
+        x = self.layer5(x)
+        x = self.relu(x) 
+
+        x_ = self.aff3(x_, self.compression5(x))
+        x_ = self.relu(x_)
+        x_ = self.spp(x_)
+        x_ = self.up8(x_)
+        
+        x_ = F.interpolate(x_, scale_factor=2, mode='bilinear', align_corners=False)
+        x_ = torch.cat((x_,x_a),dim=1)
+        #pdb.set_trace()
+        x_ = self.lastlayer(x_)
+        
+        x_ = F.interpolate(x_, size=[height_output, width_output], mode='bilinear', align_corners=False)
+
+
+        if self.augment:
+            x_extra_p = self.seghead_p(temp_1)
+            x_extra_d = self.seghead_d(temp_2)
+            x_extra_1 = F.interpolate(x_extra_p, size=[height_output, width_output], mode='bilinear', align_corners=False)
+            x_extra_2 = F.interpolate(x_extra_d, size=[height_output, width_output], mode='bilinear', align_corners=False)
+
+            return [x_extra_1, x_, x_extra_2]
+        else:
+            return x_
+
+
+def get_seg_model(cfg, imgnet_pretrained):
+    if 's' in cfg.MODEL.NAME:
+        if cfg.MODEL.NAME == 'dsnet_head128':
+            model = DSNet(m=2, n=2, num_classes=cfg.DATASET.NUM_CLASSES, planes=32, name='s128', augment=True)
+        if cfg.MODEL.NAME == 'dsnet_head64':
+            model = DSNet(m=2, n=2, num_classes=cfg.DATASET.NUM_CLASSES, planes=16, name='s64', augment=True)
+        if cfg.MODEL.NAME == 'dsnet_head256':
+            model = DSNet(m=2, n=2, num_classes=cfg.DATASET.NUM_CLASSES, planes=32, name='s256', augment=True)            
+    if 'm' in cfg.MODEL.NAME:
+        model = DSNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, name='m',augment=True)
+
+    print(model)
+    if imgnet_pretrained:
+        pretrained_path = '/root/autodl-tmp/DSNet/pretrained_models/imagenet/dhsnet_catnormal_wider_93.pth'
+        if not os.path.exists(pretrained_path):
+            print(f"Error: File not found at {pretrained_path}")
+        pretrained_state = torch.load(pretrained_path, map_location='cpu')['state_dict']
+        msg = 'Loaded {} parameters!'.format(len(pretrained_state))
+        logging.info('使用imagenet预训练权重!!!')           
+        logging.info('Attention!!!')
+        logging.info(msg)
+        logging.info('Over!!!')
+        if 'module.' in list(pretrained_state.keys())[0]:
+            # 如果包含 'module.' 前缀，去掉它
+            pretrained_state = {k[7:]: v for k, v in pretrained_state.items()}
+        model_dict = model.state_dict()
+        pretrained_state = {k: v for k, v in pretrained_state.items() if
+                            (k in model_dict and v.shape == model_dict[k].shape)}
+        model_dict.update(pretrained_state)
+        msg = 'Loaded {} parameters!'.format(len(pretrained_state))
+        logging.info('使用imagenet预训练权重!!!')           
+        logging.info('Attention!!!')
+        logging.info(msg)
+        logging.info('Over!!!')
+        model.load_state_dict(model_dict, strict=False)
+    else:
+        pretrained_dict = torch.load(cfg.MODEL.PRETRAINED, map_location='cpu')
+        print("11111")
+        if 'state_dict' in pretrained_dict:
+            pretrained_dict = pretrained_dict['state_dict']
+        model_dict = model.state_dict()
+        pretrained_dict = {k[6:]: v for k, v in pretrained_dict.items() if
+                           (k[6:] in model_dict and v.shape == model_dict[k[6:]].shape)}
+        msg = 'Loaded {} parameters!'.format(len(pretrained_dict))
+        logging.info('Attention!!!')
+        logging.info(msg)
+        logging.info('Over!!!')
+        model_dict.update(pretrained_dict)
+        model.load_state_dict(model_dict, strict=False)
+
+    return model
+
+
+def LightWeightNetwork():
+    # if name == 'dsnet_head128':
+    #     model = DSNet(m=2, n=2, num_classes=num_classes, planes=32, name='s128', augment=False)
+    # if name == 'dsnet_head64':
+    model = DSNet(m=1, n=1, num_classes=1, planes=8, name='s64', augment=False)
+    # if name == 'dsnet_head32':
+    #     model = DSNet(m=2, n=2, num_classes=num_classes, planes=32, name='s32', augment=False)
+    # if name == 'dsnet_head256':
+    #     model = DSNet(m=2, n=2, num_classes=num_classes, planes=32, name='s256', augment=False)            
+    # if name == 'm':
+    #     model = DSNet(m=2, n=3, num_classes=num_classes, planes=64, name='m',augment=False)
+
+    return model
 
 if __name__=="__main__":
     from thop import profile
     import torch
+    import onnx
+    from onnxsim import simplify
+    from onnx import checker
+    import onnxruntime
 
     input_img = torch.rand(1,3,512,512).cuda()
     net = LightWeightNetwork().cuda()
-
-    print("loading ckpt...")
-    checkpoint = torch.load(r'../result_WS/9_ICPR_Track2_lbunet_02_07_2024_17_24_14_wDS/model_weight.pth.tar')
-    net.load_state_dict(checkpoint['state_dict'])
+    net.eval()
+    #print("loading ckpt...")
+    #checkpoint = torch.load(r'../result_WS/9_ICPR_Track2_lbunet_02_07_2024_17_24_14_wDS/model_weight.pth.tar')
+    #net.load_state_dict(checkpoint['state_dict'])
 
     flops, params = profile(net, inputs=(input_img, ))
     print('Params: %2fM' % (params/1e6))
     print('FLOPs: %2fGFLOPs' % (flops/1e9))
 
     yy = net(input_img)
-
     print(input_img.shape)
     print(yy.shape)
