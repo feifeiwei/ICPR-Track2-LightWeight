@@ -614,7 +614,7 @@ def save_resize_pred(pred, size, crop_size, target_image_path, val_img_ids, num,
     preds = Image.fromarray(preds.reshape(crop_size, crop_size))
     img = preds.resize((size[0].item(), size[1].item()), Image.NEAREST)
     img.save(target_image_path + '/' + '%s' % (val_img_ids[num]) + suffix)
-    print(len(img.getbands()) , img.size)
+    #print(len(img.getbands()) , img.size)
     #return preds
 
 

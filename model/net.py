@@ -231,7 +231,7 @@ def get_seg_model(cfg, imgnet_pretrained):
     if 'm' in cfg.MODEL.NAME:
         model = DSNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, name='m',augment=True)
 
-    print(model)
+    #print(model)
     if imgnet_pretrained:
         pretrained_path = '/root/autodl-tmp/DSNet/pretrained_models/imagenet/dhsnet_catnormal_wider_93.pth'
         if not os.path.exists(pretrained_path):
@@ -257,7 +257,7 @@ def get_seg_model(cfg, imgnet_pretrained):
         model.load_state_dict(model_dict, strict=False)
     else:
         pretrained_dict = torch.load(cfg.MODEL.PRETRAINED, map_location='cpu')
-        print("11111")
+        #print("11111")
         if 'state_dict' in pretrained_dict:
             pretrained_dict = pretrained_dict['state_dict']
         model_dict = model.state_dict()
